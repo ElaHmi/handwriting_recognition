@@ -1497,7 +1497,6 @@ def build_demo() -> gr.Blocks:
                         word_out = gr.Textbox(
                             label="Digital Text",
                             interactive=False,
-                            show_copy_button=True,
                             lines=1,
                             elem_id="digital-text-out",
                         )
