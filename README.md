@@ -1,0 +1,27 @@
+---
+title: Handwriting Intelligence
+emoji: ✍️
+colorFrom: indigo
+colorTo: slate
+sdk: gradio
+sdk_version: 4.44.0
+app_file: app.py
+pinned: false
+license: apache-2.0
+short_description: Dual-neural handwriting recognition and writer identity metrics.
+---
+
+# Handwriting Intelligence
+
+A professional-grade handwriting analysis dashboard featuring:
+- **EMNIST-style OCR**: Recognizing handwritten words with high-confidence character metrics.
+- **Writer Identification**: Analyzing strokes to match one of the trained writers or detect an unknown style.
+- **Modern UI**: A clean, high-contrast interface designed for clarity and performance.
+
+## Local Setup
+1. Clone this repo.
+2. Install requirements: `pip install -r requirements.txt`.
+3. Run the app: `python app.py`.
+
+## Deployment
+Hosted on [Hugging Face Spaces](https://huggingface.co/spaces).
