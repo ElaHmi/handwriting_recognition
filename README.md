@@ -1,14 +1,11 @@
 ---
-title: Handwriting Intelligence
+title: Handwriting Recognition
 emoji: ✍️
 colorFrom: indigo
-colorTo: slate
+colorTo: blue
 sdk: gradio
-sdk_version: 4.44.0
 app_file: app.py
 pinned: false
-license: apache-2.0
-short_description: Dual-neural handwriting recognition and writer identity metrics.
 ---
 
 # Handwriting Intelligence
