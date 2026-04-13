@@ -15,7 +15,7 @@ jobs:
           lfs: true
 
       - name: Sync to Hugging Face
-        uses: huggingface/hub-sync@v1
+        uses: huggingface/hub-sync@v0.1.0
         with:
           github_repo_id: ${{ github.repository }}
           huggingface_repo_id: ElaHmi/handwriting_recognition
