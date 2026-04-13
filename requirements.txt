@@ -1,4 +1,3 @@
-# Local CPU inference (no CUDA required)
 gradio>=4.44.0,<6
 numpy>=1.24.0
 opencv-python-headless>=4.8.0

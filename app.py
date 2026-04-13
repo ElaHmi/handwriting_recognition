@@ -1595,21 +1595,23 @@ if __name__ == "__main__":
     get_writer_prototypes()
     print("=" * 72)
 
+    is_spaces = "SPACE_ID" in os.environ
     preferred = int(os.environ.get("PORT", "7860"))
-    host = os.environ.get("GRADIO_SERVER_NAME", "127.0.0.1")
-    port = _pick_listen_port(host, preferred)
+    # On HF Spaces, we MUST use 0.0.0.0; locally we prefer 127.0.0.1 for security.
+    host = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0" if is_spaces else "127.0.0.1")
+    port = preferred if is_spaces else _pick_listen_port(host, preferred)
+
     # Temporary public https://*.gradio.live URL (needs internet). On: set GRADIO_SHARE=1
     _share_raw = os.environ.get("GRADIO_SHARE", "0").strip().lower()
     share_public = _share_raw in ("1", "true", "yes", "on")
-    if share_public:
-        print(
-            "Public link: ON (Gradio tunnel). A shareable URL will appear below after startup."
-        )
-        print("To disable: set GRADIO_SHARE=0 — only http://127.0.0.1 will work.")
+
+    if share_public and not is_spaces:
+        print("Public link: ON (Gradio tunnel). A shareable URL will appear below.")
+    
     demo.queue().launch(
         server_name=host,
         server_port=port,
-        share=share_public,
+        share=share_public if not is_spaces else False,
         show_api=False,
         allowed_paths=[str(Path(__file__).resolve().parent)],
     )
