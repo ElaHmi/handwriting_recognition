@@ -2,11 +2,10 @@ name: Sync to Hugging Face Hub
 on:
   push:
     branches: [main]
-  # This allows you to run the sync manually from the Actions tab
   workflow_dispatch:
 
 jobs:
-  sync-to-hub:
+  sync:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout code
@@ -15,9 +14,10 @@ jobs:
           fetch-depth: 0
           lfs: true
 
-      - name: Upload to Hugging Face
-        env:
-          HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        # This command uses the 2026 'hf' tool to sync everything including binary models
-        run: |
-          hf upload ElaHmi/handwriting_recognition . . --repo-type space --token $HF_TOKEN
+      - name: Sync to Hugging Face
+        uses: huggingface/hub-sync@v1
+        with:
+          github_repo_id: ${{ github.repository }}
+          huggingface_repo_id: ElaHmi/handwriting_recognition
+          hf_token: ${{ secrets.HF_TOKEN }}
+          repo_type: space
