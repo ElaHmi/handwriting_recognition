@@ -12,7 +12,13 @@ jobs:
         with:
           fetch-depth: 0
           lfs: true
-      - name: Push to hub
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+      - name: Install Hugging Face Hub & Xet
+        run: pip install -U "huggingface_hub[cli,hf_xet]"
+      - name: Upload to Hugging Face
         env:
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
-        run: git push --force https://ElaHmi:$HF_TOKEN@huggingface.co/spaces/ElaHmi/handwriting_recognition main
+        run: huggingface-cli upload ElaHmi/handwriting_recognition . . --repo-type=space --token=$HF_TOKEN
