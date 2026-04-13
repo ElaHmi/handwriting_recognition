@@ -1543,6 +1543,7 @@ def build_demo() -> gr.Blocks:
 
 
 demo = build_demo()
+app = demo.app
 
 
 def _pick_listen_port(host: str, preferred: int) -> int:
