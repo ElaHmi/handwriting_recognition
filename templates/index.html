@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Handwriting Intelligence | Dual-Neural Analysis</title>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;700;900&family=Outfit:wght@300;500;800&display=swap" rel="stylesheet">
+</head>
+<body class="light-mode">
+    <div id="splash-screen" class="splash">
+        <div class="splash-inner fade-in">
+            <h1 class="splash-title">Handwriting<br>Intelligence</h1>
+            <p class="splash-subtitle">Dual-neural engine for handwriting analysis and writer identification.</p>
+            <button id="start-btn" class="btn primary-btn large">Accept Challenge</button>
+        </div>
+    </div>
+
+    <main id="app-container" class="hidden">
+        <header class="app-header">
+            <h1 class="app-logo">Handwriting Intelligence</h1>
+            <div class="header-tips">
+                <span><span class="tip-icon">✨</span> Use dark pen</span>
+                <span><span class="tip-icon">✨</span> Keep text horizontal</span>
+            </div>
+        </header>
+
+        <div class="dashboard">
+            <!-- Left Side: Input -->
+            <section class="io-section input-panel glass-card">
+                <div class="panel-header">
+                    <h3>Input Sample</h3>
+                </div>
+                <div class="upload-area" id="drop-zone">
+                    <input type="file" id="file-input" accept="image/*" hidden>
+                    <div class="upload-placeholder" id="upload-placeholder">
+                        <div class="placeholder-icon">📸</div>
+                        <p>Drag & drop or <span>click to upload</span></p>
+                    </div>
+                    <img id="image-preview" class="hidden">
+                </div>
+                <div class="control-group">
+                    <label class="toggle-switch">
+                        <input type="checkbox" id="dict-toggle" checked>
+                        <span class="slider"></span>
+                        <span class="toggle-label">Dictionary Autocorrect</span>
+                    </label>
+                </div>
+                <button id="analyze-btn" class="btn primary-btn full-width" disabled>RUN ANALYSIS</button>
+            </section>
+
+            <!-- Right Side: Dashboard -->
+            <section class="io-section results-panel">
+                <!-- Transcription Card -->
+                <div class="glass-card mb-20 animate-up">
+                    <div class="panel-header">
+                        <h3>Transcription</h3>
+                    </div>
+                    <div class="transcription-output">
+                        <div id="digital-text" class="digital-text-out">Waiting...</div>
+                        <div id="raw-word-hint" class="raw-word-hint hidden"></div>
+                    </div>
+                </div>
+
+                <!-- Metrics Grid -->
+                <div class="metrics-grid">
+                    <!-- Character Accuracy -->
+                    <div class="glass-card animate-up" style="animation-delay: 0.1s;">
+                        <div class="panel-header">
+                            <h3>Character Accuracy</h3>
+                        </div>
+                        <div id="char-metrics" class="metrics-content">
+                            <p class="empty-hint">Waiting for analysis...</p>
+                        </div>
+                        <div id="writer-headline" class="writer-headline-out"></div>
+                    </div>
+
+                    <!-- Identity Metrics -->
+                    <div class="glass-card animate-up" style="animation-delay: 0.2s;">
+                        <div class="panel-header">
+                            <h3>Identity Metrics</h3>
+                        </div>
+                        <div id="identity-metrics" class="metrics-content">
+                            <p class="empty-hint">Waiting for analysis...</p>
+                        </div>
+                </div>
+
+                <!-- Neural Debug View -->
+                <div class="glass-card animate-up" style="animation-delay: 0.3s;">
+                    <div class="panel-header">
+                        <h3>Neural Debug View</h3>
+                        <p class="panel-subtitle">Visualizing the character patches segmented from your input.</p>
+                    </div>
+                    <div id="neural-patches" class="patch-grid">
+                        <p class="empty-hint">Waiting for analysis...</p>
+                    </div>
+                </div>
+            </section>
+        </div>
+
+        <footer class="app-footer">
+            <p>&copy; 2026 AI Lab | Handwriting Intelligence v3.0 (Flask Local)</p>
+        </footer>
+    </main>
+
+    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+</body>
+</html>

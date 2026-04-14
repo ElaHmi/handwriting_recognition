@@ -1,14 +1,5 @@
 """
-EMNIST-style handwritten word recognition — local Gradio web UI.
-
-Inference only. OCR weights from `shaikhas_model.ipynb`: current **CharCNN** is 3× conv
-+ BatchNorm (1152-D head) saved as `char_model.pth` / `char_model_finetuned.pth`.
-Older 2-conv checkpoints (1600-D head) still load as **CharCNNLegacy**.
-Word images use the same OpenCV segmentation as the notebook (`BINARY_INV` + OTSU,
-i-dot merge, 10px border) when a CharCNN* model is loaded; generic **EmnistCNN** weights
-keep the previous contour + EMNIST-align path.
-
-Set MODEL_PATH to a specific .pth if needed. The notebook file itself is not loadable as weights.
+EMNIST-style handwritten word recognition — local Flask web UI.
 """
 
 from __future__ import annotations
@@ -21,12 +12,22 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import cv2
-import gradio as gr
+import base64
+import io
+from flask import Flask, request, jsonify, render_template
+from flask_cors import CORS
+from werkzeug.utils import secure_filename
 from PIL import Image
 import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from spellchecker import SpellChecker
+
+# ---------------------------------------------------------------------------
+# SpellChecker Initialization
+# ---------------------------------------------------------------------------
+spell = SpellChecker()
 
 # ---------------------------------------------------------------------------
 # Configuration
@@ -698,6 +699,56 @@ def _patches_from_image_notebook(
     return characters, valid_boxes
 
 
+def align_style_like_emnist(gray_patch: np.ndarray) -> np.ndarray:
+    """
+    Match EMNIST preprocessing: 
+    1. Binarize (INV+OTSU)
+    2. Center/Crop
+    3. Resize to 20x20
+    4. Pad to 28x28
+    5. Dilation (Added to match bold training data)
+    """
+    _, thresh = cv2.threshold(gray_patch, 127, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+    
+    # Simple centering by bounding box
+    coords = cv2.findNonZero(thresh)
+    if coords is None:
+        return np.zeros((28, 28), dtype=np.uint8)
+    
+    x, y, w, h = cv2.boundingRect(coords)
+    char = thresh[y:y+h, x:x+w]
+    
+    # Resize long side to 20px
+    if h > w:
+        new_h = 20
+        new_w = int(w * (20 / h))
+    else:
+        new_w = 20
+        new_h = int(h * (20 / w))
+    
+    if new_h < 1 or new_w < 1:
+        return np.zeros((28, 28), dtype=np.uint8)
+        
+    resized = cv2.resize(char, (new_w, new_h), interpolation=cv2.INTER_AREA)
+    
+    # Pad to 28x28
+    pad_h = (28 - new_h) // 2
+    pad_w = (28 - new_w) // 2
+    padded = cv2.copyMakeBorder(
+        resized, 
+        pad_h, 28 - new_h - pad_h, 
+        pad_w, 28 - new_w - pad_w, 
+        cv2.BORDER_CONSTANT, value=0
+    )
+
+    # STEP 5: Neural Thickening (Dilation)
+    # This helps thin pen strokes match the bold EMNIST training data.
+    kernel = np.ones((2, 2), np.uint8)
+    padded = cv2.dilate(padded, kernel, iterations=1)
+
+    return padded
+
+
 def _patches_from_image_classic(gray: np.ndarray) -> List[np.ndarray]:
     """Contour + EMNIST-style align (for generic EmnistCNN weights)."""
     boxes = segment_character_boxes(gray)
@@ -747,16 +798,13 @@ def run_inference_on_patches(
     model: nn.Module,
     mapping: List[str],
     boxes: Optional[List[Tuple[int, int, int, int]]] = None,
-) -> Tuple[str, List[Tuple[str, float]]]:
+) -> Tuple[str, List[List[Tuple[str, float]]], List[np.ndarray]]:
     """
-    Returns (word, [(char, confidence), ...]) — one entry per character.
-
-    When `boxes` is provided (notebook-style segmentation) the space-detection
-    logic from `shaikhas_model.ipynb` `predict_word` is applied:
-      gap > max(median_gap * 1.8, avg_width * 0.9)  AND  gap > max_gap * 0.7
+    Returns (word, [[(char, confidence), ...], ...], patches)
+    One list of confidences per character patch.
     """
     if not patches:
-        return "", []
+        return "", [], []
 
     batch = torch.cat([patch_to_tensor(p) for p in patches], dim=0)
     with torch.no_grad():
@@ -764,75 +812,83 @@ def run_inference_on_patches(
         probs = F.softmax(logits, dim=1)
         confs, preds = probs.max(dim=1)
 
-    char_confs: List[Tuple[str, float]] = []
-    for idx, conf in zip(preds.tolist(), confs.tolist()):
-        ch = mapping[idx] if 0 <= idx < len(mapping) else "?"
-        char_confs.append((ch, float(conf)))
+    # Store full distribution for top-3 display
+    char_confs_all: List[List[Tuple[str, float]]] = []
+    for i in range(len(preds)):
+        p_probs = probs[i].cpu().numpy()
+        sorted_indices = np.argsort(p_probs)[::-1]
+        p_confs = []
+        for idx in sorted_indices:
+            p_confs.append((mapping[idx], float(p_probs[idx])))
+        char_confs_all.append(p_confs)
 
-    # -----------------------------------------------------------------------
-    # Space detection (matches shaikhas_model.ipynb predict_word exactly)
-    # -----------------------------------------------------------------------
+    # Word string from top guesses
+    word_chars = [mapping[p] for p in preds.cpu().numpy().tolist()]
+
+    # Space Detection
     if boxes and len(boxes) > 1:
-        sorted_boxes = sorted(boxes, key=lambda b: b[0])
+        # Sort characters by x-coordinate for gap analysis
+        sorted_indices = np.argsort([b[0] for b in boxes])
         gaps: List[float] = []
-        for i in range(1, len(sorted_boxes)):
-            px, py, pw, ph = sorted_boxes[i - 1]
-            cx, cy, cw, ch_h = sorted_boxes[i]
+        for i in range(1, len(sorted_indices)):
+            prev_idx = sorted_indices[i-1]
+            curr_idx = sorted_indices[i]
+            px, py, pw, ph = boxes[prev_idx]
+            cx, cy, cw, ch = boxes[curr_idx]
             gaps.append(float(cx - (px + pw)))
 
-        median_gap = float(np.median(gaps))
-        max_gap = float(max(gaps))
-        widths = [float(b[2]) for b in sorted_boxes]
-        avg_width = sum(widths) / len(widths)
-        space_threshold = max(median_gap * 1.8, avg_width * 0.9)
-        gap_ratio_threshold = 0.7
+        if gaps:
+            median_gap = float(np.median(gaps))
+            max_gap = float(max(gaps))
+            widths = [float(b[2]) for b in boxes]
+            avg_width = sum(widths) / len(widths)
+            space_threshold = max(median_gap * 1.5, avg_width * 0.6)
+            gap_ratio_threshold = 0.4
 
-        word_parts: List[str] = []
-        for i, (ch, _conf) in enumerate(char_confs):
-            word_parts.append(ch)
-            if i < len(gaps):
-                if gaps[i] > space_threshold and gaps[i] > max_gap * gap_ratio_threshold:
-                    word_parts.append(" ")
-        word = "".join(word_parts).strip()
+            offset = 0
+            for i, gap in enumerate(gaps):
+                if gap > space_threshold and gap > max_gap * gap_ratio_threshold:
+                    word_chars.insert(i + 1 + offset, " ")
+                    offset += 1
+        word = "".join(word_chars).strip()
     else:
-        word = "".join(ch for ch, _ in char_confs)
+        word = "".join(word_chars)
 
-    return word, char_confs
+    return word, char_confs_all, patches
 
 
-def _char_conf_html(char_confs: List[Tuple[str, float]]) -> str:
-    """Render per-character confidence cards as HTML (compact size)."""
-    if not char_confs:
-        return "<p style='color:#888;font-style:italic;'>No results yet.</p>"
+def _single_char_html(char_confs: List[Tuple[str, float]]) -> str:
+    """Render a single character card (simplified)."""
+    main_ch, main_conf = char_confs[0]
+    pct = main_conf * 100
 
-    cards = []
-    for ch, conf in char_confs:
-        pct = conf * 100
-        # Colour: sky-blue >= 90, amber >= 70, red below
-        if pct >= 90:
-            colour = "#0ea5e9"
-        elif pct >= 70:
-            colour = "#f59e0b"
-        else:
-            colour = "#ef4444"
-        cards.append(
-            f'<div style="display:inline-flex;flex-direction:column;align-items:center;'
-            f'justify-content:center;width:58px;height:68px;margin:4px;'
-            f'border:2px solid {colour};border-radius:10px;'
-            f'background:#fff;box-shadow:0 1px 4px rgba(0,0,0,.07);">'
-            f'<span style="font-size:1.5rem;font-weight:700;color:{colour};line-height:1.1;">{ch}</span>'
-            f'<span style="font-size:0.68rem;color:#555;margin-top:3px;">{pct:.1f}%</span>'
-            f'</div>'
-        )
+    if pct >= 90: colour = "#0ea5e9"
+    elif pct >= 70: colour = "#f59e0b"
+    else: colour = "#ef4444"
+
     return (
-        '<div style="display:flex;flex-wrap:wrap;gap:4px;padding:6px 0;">'
+        f'<div class="char-result-card">'
+        f'<span class="char-main" style="color:{colour};">{main_ch}</span>'
+        f'<span class="char-pct">{pct:.1f}%</span>'
+        f'</div>'
+    )
+
+
+def _char_conf_html(char_confs_list: List[List[Tuple[str, float]]]) -> str:
+    """Render list of char_confs (one list per patch) as HTML."""
+    if not char_confs_list:
+        return "<p class='empty-hint'>No results yet.</p>"
+    
+    cards = [_single_char_html(c) for c in char_confs_list]
+    return (
+        '<div class="char-grid-wrap">'
         + "".join(cards)
         + "</div>"
     )
 
 
-def predict_word(image: Any, mode_label: str) -> Tuple[str, str]:
-    """Returns (predicted_word, per_char_html)."""
+def predict_word(image: Any, mode_label: str) -> Tuple[str, str, List[np.ndarray]]:
+    """Returns (predicted_word, per_char_html, patches)."""
     gray = to_gray_uint8(image)
     if gray is None:
         return "", "<p style='color:#888;'>No image provided. Please upload a photo first.</p>"
@@ -847,8 +903,8 @@ def predict_word(image: Any, mode_label: str) -> Tuple[str, str]:
     try:
         use_notebook_seg = isinstance(model, (CharCNN, CharCNNLegacy))
         patches, boxes = patches_from_image(gray, notebook_style=use_notebook_seg)
-        word, char_confs = run_inference_on_patches(patches, model, mapping, boxes=boxes)
-        return word, _char_conf_html(char_confs)
+        word, char_confs, final_patches = run_inference_on_patches(patches, model, mapping, boxes=boxes)
+        return word, _char_conf_html(char_confs), final_patches
     except Exception as exc:  # noqa: BLE001
         return "", f"<p style='color:red;'>Processing error: {exc}</p>"
 
@@ -876,12 +932,8 @@ def _load_writer_checkpoint_raw(path: Path) -> Any:
 
 
 def gray_to_writer_tensor(gray: np.ndarray) -> torch.Tensor:
-    """
-    Match WriterWordDataset._load_image: trim margins, resize to 64×256 canvas, /255.
-
-    Do **not** invert by brightness here — training data is dark ink on white paper.
-    (Inverting was wrongly applied for high mean and pushed most inputs toward one class.)
-    """
+    # Match WriterWordDataset._load_image: trim margins, resize to 64x256 canvas, /255.
+    # Do not invert by brightness here - training data is dark ink on white paper.
     img = Image.fromarray(gray.astype(np.uint8), mode="L")
     img_np = np.array(img)
     threshold = 250
@@ -1281,336 +1333,109 @@ def predict_writer_ui(image: Any) -> Tuple[str, str]:
         return "", f"<p style='color:red;'>Writer prediction error: {exc}</p>"
 
 
-def predict_transcription_and_writer(image: Any) -> Tuple[str, str, str, str]:
-    """One upload → OCR + writer (same image)."""
-    w, h = predict_word(image, "Upload")
+def predict_transcription_and_writer(image: Any) -> Tuple[str, str, str, str, List[np.ndarray]]:
+    """One upload -> OCR + writer (same image)."""
+    word, char_html, patches = predict_word(image, "Upload")
     wh, whtml = predict_writer_ui(image)
-    return w, h, wh, whtml
+    return word, char_html, wh, whtml, patches
 
 
 # ---------------------------------------------------------------------------
-theme = gr.themes.Soft(primary_hue="indigo", neutral_hue="slate").set(
-    body_background_fill="white",
-    body_background_fill_dark="white",
-    block_background_fill="white",
-    block_background_fill_dark="white",
-    block_label_background_fill="white",
-    block_label_background_fill_dark="white",
-    block_title_background_fill="white",
-    block_title_background_fill_dark="white",
-    block_label_text_color="#000000",
-    block_title_text_color="#000000",
-    body_text_color="#000000",
-)
+# Flask App Setup
+# ---------------------------------------------------------------------------
 
-custom_css = """
-/* ------------------------------------------------------------------ */
-/* Use system font stack — zero network round-trips, instant render.   */
-/* ------------------------------------------------------------------ */
-footer { display: none !important; }
+app = Flask(__name__)
+CORS(app)
 
-* {
-    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto,
-                 Helvetica, Arial, sans-serif !important;
-    color: black !important;
-    color-scheme: light !important;
-}
+@app.route("/")
+def index():
+    return render_template("index.html")
 
-/* NUCLEAR FIX FOR BLACK BARS/BACKGROUNDS */
-body, .gradio-container, gradio-app, .gr-box, .gr-form, .gr-input, .gr-button, .gr-panel, .gr-block-label, .gr-label, .gr-padded, .gr-group, .gr-block {
-    background-color: white !important;
-    background-image: none !important;
-    color: black !important;
-}
+@app.route("/predict", methods=["POST"])
+def predict():
+    if "image" not in request.files:
+        return jsonify({"error": "No image uploaded"}), 400
+    
+    file = request.files["image"]
+    if file.filename == "":
+        return jsonify({"error": "No image selected"}), 400
 
-/* Specific target for Gradio's internal container bar colors */
-div[class*="gr-"], span[class*="gr-"], label[class*="gr-"] {
-    background-color: white !important;
-    border-color: #f1f5f9 !important;
-}
+    try:
+        # Read image to numpy
+        in_memory_file = io.BytesIO()
+        file.save(in_memory_file)
+        data = np.frombuffer(in_memory_file.getvalue(), dtype=np.uint8)
+        img_bgr = cv2.imdecode(data, cv2.IMREAD_COLOR)
+        if img_bgr is None:
+             return jsonify({"error": "Invalid image file"}), 400
+        img_rgb = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2RGB)
 
-/* Minimal Layout Boxes */
-.glass-card {
-    background: white !important;
-    border: 1px solid #e2e8f0 !important;
-    border-radius: 4px !important;
-    box-shadow: none !important;
-    padding: 24px !important;
-    margin-bottom: 20px !important;
-    overflow: visible !important;
-    height: auto !important;
-}
+        # Run analysis
+        raw_word, char_html, writer_headline, writer_html, patches = predict_transcription_and_writer(img_rgb)
 
-/* ------------------------------------------------------------------ */
-/* Digital Text — large, prominent output                              */
-/* ------------------------------------------------------------------ */
-#digital-text-out textarea,
-#digital-text-out input {
-    font-size: 2.4rem !important;
-    font-weight: 800 !important;
-    letter-spacing: 0.04em !important;
-    line-height: 1.3 !important;
-    padding: 12px 16px !important;
-    background: #f8fafc !important;
-    border: 2px solid #cbd5e1 !important;
-    color: black !important;
-    opacity: 1 !important;
-    min-height: 70px !important;
-}
-
-/* ------------------------------------------------------------------ */
-/* Character Accuracy cards — compact                                  */
-/* ------------------------------------------------------------------ */
-.char-card-wrap {
-    display: flex;
-    flex-wrap: wrap;
-    gap: 4px;
-    padding: 6px 0;
-}
-.char-card {
-    display: inline-flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    width: 58px;
-    height: 68px;
-    margin: 4px;
-    border-radius: 10px;
-    background: #fff;
-    box-shadow: 0 1px 4px rgba(0,0,0,.07);
-}
-.char-card .ch  { font-size: 1.5rem; font-weight: 700; line-height: 1.1; }
-.char-card .pct { font-size: 0.68rem; color: #555; margin-top: 3px; }
-
-/* Writer-identity headline textbox */
-#pred-word { border: none !important; box-shadow: none !important; padding: 0 !important; margin-top: 20px !important; }
-#pred-word textarea, #pred-word input {
-    font-size: 1rem !important;
-    font-weight: 600 !important;
-    background: #f8fafc !important;
-    border: 1px solid #cbd5e1 !important;
-    color: black !important;
-    opacity: 1 !important;
-}
-
-/* Force all text items to black */
-p, span, label, li, h1, h2, h3, .gr-label, .gr-markdown, .gr-markdown-header, .gr-label-text, .gr-block-label {
-    color: black !important;
-    opacity: 1 !important;
-}
-
-/* Stop internal scrolling */
-.gr-box, .gr-form, .gr-block, .gr-group, .gr-row, .gr-column {
-    overflow: visible !important;
-    height: auto !important;
-    max-height: none !important;
-}
-
-/* Animations */
-.fade-in { animation: fadeIn 0.3s ease-out forwards; }
-@keyframes fadeIn { from { opacity: 0; transform: translateY(5px); } to { opacity: 1; transform: translateY(0); } }
-
-/* Splash Screen */
-.splash-content {
-    display: flex;
-    flex-direction: column;
-    align-items: center;
-    justify-content: center;
-    min-height: 80vh;
-    text-align: center;
-    background: white !important;
-}
-
-.splash-title {
-    font-size: 4rem !important;
-    font-weight: 900 !important;
-    margin-bottom: 2rem;
-    color: black !important;
-}
-
-.start-btn {
-    background: #000 !important;
-    color: white !important;
-    padding: 1rem 4rem !important;
-    font-size: 1.4rem !important;
-    font-weight: 800 !important;
-    border-radius: 0 !important;
-}
-"""
-
-
-def build_demo() -> gr.Blocks:
-    with gr.Blocks(
-        title="Handwriting Intelligence",
-        theme=theme,
-        css=custom_css,
-    ) as demo:
-        # --- Splash Screen ---
-        with gr.Column(visible=True, elem_classes="splash-content") as splash_container:
-            gr.HTML(
-                """
-                <div class="fade-in">
-                    <h1 class="splash-title">Handwriting<br/>Intelligence</h1>
-                    <p style="font-size:1.4rem; color:black; margin-bottom:3rem; max-width:600px;">
-                        Do you dare to challenge the AI to read your handwriting? 
-                        Witness the power of dual-neural analysis.
-                    </p>
-                </div>
-                """
-            )
-            btn_start = gr.Button("Accept Challenge", variant="primary", elem_classes="start-btn fade-in")
-
-        # --- Main App Interface ---
-        with gr.Column(visible=False, elem_classes="fade-in") as main_container:
-            # Minimal Tips Row (Pure Black Text)
-            gr.HTML(
-                """
-                <div style="display:flex; justify-content:center; gap:30px; padding:15px; font-size:0.9rem; color:black; font-weight:700;">
-                    <span>Tip: Use dark pen</span>
-                    <span>Tip: Keep text horizontal</span>
-                    <span>Tip: 5 trained writers supported</span>
-                </div>
-                """
-            )
-
-            with gr.Row(equal_height=False):
-                # Left Column (Input)
-                with gr.Column(scale=1):
-                    with gr.Group(elem_classes="glass-card"):
-                        gr.Markdown("### Input Sample")
-                        upload_image = gr.Image(
-                            label=None,
-                            type="numpy",
-                            image_mode="RGB",
-                            sources=["upload"],
-                            height=300,
-                        )
-                        btn_predict = gr.Button(
-                            "RUN ANALYSIS", variant="primary", scale=1
-                        )
-
-                # Right Column (Wide Dashboard)
-                with gr.Column(scale=2):
-                    # Vertical Stack for Results
-                    with gr.Column(elem_classes="glass-card"):
-                        gr.Markdown("### Transcription")
-                        word_out = gr.Textbox(
-                            label="Digital Text",
-                            interactive=False,
-                            lines=1,
-                            elem_id="digital-text-out",
-                        )
-
-                        gr.Markdown("### Character Accuracy")
-                        conf_html = gr.HTML(value="<p style='color:black;'>Waiting for analysis...</p>")
-                        
-                        # Part 2 Minimal Match - Moved below Character Accuracy
-                        writer_headline = gr.Textbox(
-                            show_label=False,
-                            placeholder="Awaiting identity match...",
-                            interactive=False,
-                            elem_id="pred-word",
-                        )
-                        
-                    with gr.Column(elem_classes="glass-card"):
-                        gr.Markdown("### Identity Metrics")
-                        writer_probs_html = gr.HTML(value="<p style='color:black;'>Waiting for analysis...</p>")
-
-            gr.HTML(
-                "<div style='text-align:center; padding:40px; opacity:1; font-size:0.8rem; color:black;'>"
-                "&copy; 2026 AI Lab | Handwriting Intelligence v3.0"
-                "</div>"
-            )
-
-        # Transition Logic
-        def start_app():
-            return gr.update(visible=False), gr.update(visible=True)
-
-        btn_start.click(
-            fn=start_app,
-            inputs=[],
-            outputs=[splash_container, main_container],
-        )
-
-        btn_predict.click(
-            fn=predict_transcription_and_writer,
-            inputs=[upload_image],
-            outputs=[word_out, conf_html, writer_headline, writer_probs_html],
-        )
-
-    return demo
-
-
-demo = build_demo()
-
-
-def _pick_listen_port(host: str, preferred: int) -> int:
-    """Prefer preferred; if busy, use the next free port in a short range (local dev)."""
-    if os.environ.get("GRADIO_SERVER_PORT"):
-        return int(os.environ["GRADIO_SERVER_PORT"])
-    bind = "127.0.0.1" if host in ("127.0.0.1", "localhost") else "0.0.0.0"
-    for p in range(preferred, preferred + 40):
-        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-            try:
-                s.bind((bind, p))
-                return p
-            except OSError:
+        # Dictionary correction
+        words = raw_word.split()
+        corrected_words = []
+        for w in words:
+            # Handle empty or single-char words
+            if len(w) <= 1:
+                corrected_words.append(w)
                 continue
-    return preferred
+            
+            # Get best correction
+            cor = spell.correction(w)
+            # Use original if no correction found or if it's name-like (Capitalized)
+            if cor and cor.lower() != w.lower():
+                # Preserve capitalization if original was capitalized
+                if w[0].isupper():
+                    cor = cor.capitalize()
+                corrected_words.append(cor)
+            else:
+                corrected_words.append(w)
+        
+        corrected_word = " ".join(corrected_words)
 
+        # Convert patches to base64
+        encoded_patches = []
+        for p in patches:
+            _, buffer = cv2.imencode('.png', p)
+            encoded_patches.append(base64.b64encode(buffer).decode('utf-8'))
+
+        return jsonify({
+            "word": corrected_word,
+            "raw_word": raw_word,
+            "char_html": char_html,
+            "writer_headline": writer_headline,
+            "writer_html": writer_html,
+            "patches": encoded_patches
+        })
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     _wp = _resolve_model_path()
     _ww = _resolve_writer_model_path()
     _wproto = _resolve_writer_prototypes_path()
     _wthr = _resolve_writer_threshold_json_path()
+    
     print("=" * 72)
-    print(f"EMNIST handwriting app  |  {APP_LOADER_VERSION}")
-    print(f"app.py:  {APP_FILE_PATH}")
+    print(f"EMNIST handwriting app (Flask) | {APP_LOADER_VERSION}")
     print(f"OCR weights:     {_wp if _wp else '(not found)'}")
     print(f"Writer weights:  {_ww if _ww else '(not found)'}")
-    print(
-        f"Writer prototypes: {_wproto if _wproto else '(not found — in/out group uses softmax heuristics only)'}"
-    )
-    if _wproto:
-        print(f"Writer threshold json: {_wthr if _wthr else '(not found)'}")
-        print(
-            f"  → distance cutoff: env/file/default — set WRITER_PROTO_DISTANCE_THRESHOLD to match part2 75th %ile if needed"
-        )
     print("=" * 72)
 
-    # -----------------------------------------------------------------
-    # Eager model warm-up: load both models now so the first inference
-    # click is instant instead of stalling while weights are read.
-    # -----------------------------------------------------------------
     print("Warming up OCR model...", end=" ", flush=True)
     _m, _me = get_model()
     print("OK" if _m else f"WARN: {_me}")
+    
     print("Warming up writer model...", end=" ", flush=True)
     _wm, _wme = get_writer_model()
     print("OK" if _wm else f"WARN: {_wme}")
-    # Also pre-load prototypes so the writer tab is instant too.
+    
     get_writer_prototypes()
     print("=" * 72)
 
-    is_spaces = "SPACE_ID" in os.environ
-    preferred = int(os.environ.get("PORT", "7860"))
-    # On HF Spaces, we MUST use 0.0.0.0; locally we prefer 127.0.0.1 for security.
-    host = os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0" if is_spaces else "127.0.0.1")
-    port = preferred if is_spaces else _pick_listen_port(host, preferred)
+    port = int(os.environ.get("PORT", 5000))
+    print(f"Starting server on http://127.0.0.1:{port}")
+    app.run(host="127.0.0.1", port=port, debug=True)
 
-    # Temporary public https://*.gradio.live URL (needs internet). On: set GRADIO_SHARE=1
-    _share_raw = os.environ.get("GRADIO_SHARE", "0").strip().lower()
-    share_public = _share_raw in ("1", "true", "yes", "on")
-
-    if share_public and not is_spaces:
-        print("Public link: ON (Gradio tunnel). A shareable URL will appear below.")
-    
-    demo.queue().launch(
-        server_name=host,
-        server_port=port,
-        share=share_public if not is_spaces else False,
-        show_api=False,
-        allowed_paths=[str(Path(__file__).resolve().parent)],
-    )

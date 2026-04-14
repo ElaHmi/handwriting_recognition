@@ -1,15 +1,3 @@
----
-title: Handwriting Recognition
-emoji: ✍️
-colorFrom: indigo
-colorTo: blue
-sdk: gradio
-sdk_version: 5.27.0
-python_version: 3.11
-app_file: app.py
-pinned: false
----
-
 # Handwriting Intelligence
 
 A professional-grade handwriting analysis dashboard featuring:
@@ -22,5 +10,3 @@ A professional-grade handwriting analysis dashboard featuring:
 2. Install requirements: `pip install -r requirements.txt`.
 3. Run the app: `python app.py`.
 
-## Deployment
-Hosted on [Hugging Face Spaces](https://huggingface.co/spaces).
